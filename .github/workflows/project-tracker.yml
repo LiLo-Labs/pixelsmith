@@ -1,0 +1,172 @@
+name: Project date tracker
+
+on:
+  issues:
+    types: [closed, opened]
+
+env:
+  PROJECT_ID: PVT_kwDOD49Eas4BPDxe
+  START_FIELD: PVTF_lADOD49Eas4BPDxezg9lO1Q
+  TARGET_FIELD: PVTF_lADOD49Eas4BPDxezg9lO18
+  ISSUE_NUMBER: ${{ github.event.issue.number }}
+  REPO_FULL: ${{ github.repository }}
+  EVENT_ACTION: ${{ github.event.action }}
+
+jobs:
+  update-dates:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    steps:
+      - name: Update project dates
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          OWNER="${REPO_FULL%/*}"
+          REPO="${REPO_FULL#*/}"
+          TODAY=$(date -u +%Y-%m-%d)
+
+          echo "Processing $REPO_FULL#$ISSUE_NUMBER ($EVENT_ACTION)"
+
+          ITEM_ID=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                issue(number: $number) {
+                  projectItems(first: 10) {
+                    nodes {
+                      id
+                      project { id }
+                    }
+                  }
+                }
+              }
+            }' -f owner="$OWNER" -f repo="$REPO" -F number="$ISSUE_NUMBER" \
+            --jq ".data.repository.issue.projectItems.nodes[] | select(.project.id == \"$PROJECT_ID\") | .id")
+
+          if [ -z "$ITEM_ID" ]; then
+            echo "Issue not on project board, skipping"
+            exit 0
+          fi
+
+          if [ "$EVENT_ACTION" = "closed" ]; then
+            echo "Setting Target date to $TODAY on $ITEM_ID"
+            gh project item-edit \
+              --project-id "$PROJECT_ID" \
+              --id "$ITEM_ID" \
+              --field-id "$TARGET_FIELD" \
+              --date "$TODAY"
+          fi
+
+          if [ "$EVENT_ACTION" = "opened" ]; then
+            echo "Setting Start date to $TODAY on $ITEM_ID"
+            gh project item-edit \
+              --project-id "$PROJECT_ID" \
+              --id "$ITEM_ID" \
+              --field-id "$START_FIELD" \
+              --date "$TODAY"
+          fi
+
+          PARENT_NUMBER=$(gh api "repos/$REPO_FULL/issues/$ISSUE_NUMBER" \
+            --jq '.parent.number // empty' 2>/dev/null || true)
+
+          if [ -z "$PARENT_NUMBER" ]; then
+            echo "No parent issue, done"
+            exit 0
+          fi
+
+          echo "Updating parent epic #$PARENT_NUMBER dates"
+
+          PARENT_ITEM_ID=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                issue(number: $number) {
+                  projectItems(first: 10) {
+                    nodes {
+                      id
+                      project { id }
+                    }
+                  }
+                }
+              }
+            }' -f owner="$OWNER" -f repo="$REPO" -F number="$PARENT_NUMBER" \
+            --jq ".data.repository.issue.projectItems.nodes[] | select(.project.id == \"$PROJECT_ID\") | .id")
+
+          if [ -z "$PARENT_ITEM_ID" ]; then
+            echo "Parent not on project board, skipping"
+            exit 0
+          fi
+
+          SUB_NUMBERS=$(gh api "repos/$REPO_FULL/issues/$PARENT_NUMBER/sub_issues" \
+            --jq '.[].number' 2>/dev/null || true)
+
+          if [ -z "$SUB_NUMBERS" ]; then
+            echo "No sub-issues found, done"
+            exit 0
+          fi
+
+          EARLIEST_START=""
+          LATEST_TARGET=""
+
+          for NUM in $SUB_NUMBERS; do
+            DATES=$(gh api graphql -f query='
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  issue(number: $number) {
+                    projectItems(first: 10) {
+                      nodes {
+                        project { id }
+                        fieldValues(first: 20) {
+                          nodes {
+                            ... on ProjectV2ItemFieldDateValue {
+                              date
+                              field { ... on ProjectV2Field { name } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -f owner="$OWNER" -f repo="$REPO" -F number="$NUM" \
+              --jq ".data.repository.issue.projectItems.nodes[]
+                     | select(.project.id == \"$PROJECT_ID\")
+                     | .fieldValues.nodes[]
+                     | select(.date != null)
+                     | \"\(.field.name)=\(.date)\"" 2>/dev/null || true)
+
+            for LINE in $DATES; do
+              FIELD_NAME="${LINE%%=*}"
+              DATE_VAL="${LINE#*=}"
+              if [ "$FIELD_NAME" = "Start date" ]; then
+                if [ -z "$EARLIEST_START" ] || [[ "$DATE_VAL" < "$EARLIEST_START" ]]; then
+                  EARLIEST_START="$DATE_VAL"
+                fi
+              elif [ "$FIELD_NAME" = "Target date" ]; then
+                if [ -z "$LATEST_TARGET" ] || [[ "$DATE_VAL" > "$LATEST_TARGET" ]]; then
+                  LATEST_TARGET="$DATE_VAL"
+                fi
+              fi
+            done
+          done
+
+          if [ -n "$EARLIEST_START" ]; then
+            echo "Setting parent Start date to $EARLIEST_START"
+            gh project item-edit \
+              --project-id "$PROJECT_ID" \
+              --id "$PARENT_ITEM_ID" \
+              --field-id "$START_FIELD" \
+              --date "$EARLIEST_START"
+          fi
+
+          if [ -n "$LATEST_TARGET" ]; then
+            echo "Setting parent Target date to $LATEST_TARGET"
+            gh project item-edit \
+              --project-id "$PROJECT_ID" \
+              --id "$PARENT_ITEM_ID" \
+              --field-id "$TARGET_FIELD" \
+              --date "$LATEST_TARGET"
+          fi
+
+          echo "Done"
