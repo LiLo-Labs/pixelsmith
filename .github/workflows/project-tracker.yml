@@ -69,7 +69,7 @@ jobs:
           fi
 
           PARENT_NUMBER=$(gh api "repos/$REPO_FULL/issues/$ISSUE_NUMBER" \
-            --jq '.parent.number // empty' 2>/dev/null || true)
+            --jq 'if .parent_issue_url then (.parent_issue_url | split("/") | last) else empty end' 2>/dev/null || true)
 
           if [ -z "$PARENT_NUMBER" ]; then
             echo "No parent issue, done"
@@ -136,7 +136,8 @@ jobs:
                      | select(.date != null)
                      | \"\(.field.name)=\(.date)\"" 2>/dev/null || true)
 
-            for LINE in $DATES; do
+            while IFS= read -r LINE; do
+              [ -z "$LINE" ] && continue
               FIELD_NAME="${LINE%%=*}"
               DATE_VAL="${LINE#*=}"
               if [ "$FIELD_NAME" = "Start date" ]; then
@@ -148,7 +149,7 @@ jobs:
                   LATEST_TARGET="$DATE_VAL"
                 fi
               fi
-            done
+            done <<< "$DATES"
           done
 
           if [ -n "$EARLIEST_START" ]; then
