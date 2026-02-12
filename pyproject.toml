@@ -10,6 +10,7 @@ dependencies = [
     "diffusers>=0.27",
     "transformers>=4.36",
     "accelerate>=0.25",
+    "peft>=0.9",
     "safetensors>=0.4",
     "Pillow>=10.0",
     "numpy>=1.26",
